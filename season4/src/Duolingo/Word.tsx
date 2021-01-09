@@ -17,7 +17,7 @@ const styles = StyleSheet.create({
   },
   text: {
     fontFamily: "Nunito-Regular",
-    fontSize: 19,
+    fontSize: 16,
   },
   shadow: {
     ...StyleSheet.absoluteFillObject,

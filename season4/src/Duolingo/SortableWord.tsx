@@ -11,10 +11,13 @@ import {
   PanGestureHandler,
   PanGestureHandlerGestureEvent,
 } from "react-native-gesture-handler";
-import { between, useVector } from "react-native-redash";
+import { useVector } from "react-native-redash";
 
 import {
+  isBeyondCenterOfMass,
+  IsBeyondCenterOfMassArgs,
   calculateLayout,
+  getSortedOffsets,
   lastOrder,
   Offset,
   remove,
@@ -25,6 +28,30 @@ import {
   MARGIN_TOP,
 } from "./Layout";
 import Placeholder from "./components/Placeholder";
+
+function isBeforeCenterOfMass(
+  offset: Offset,
+  iterationOffset: Offset,
+  centerOfMassArgs: IsBeyondCenterOfMassArgs
+) {
+  "worklet";
+  return (
+    offset.order.value > iterationOffset.order.value &&
+    isBeyondCenterOfMass({ ...centerOfMassArgs, inverse: true })
+  );
+}
+
+function isAfterCenterOfMass(
+  offset: Offset,
+  iterationOffset: Offset,
+  centerOfMassArgs: IsBeyondCenterOfMassArgs
+) {
+  "worklet";
+  return (
+    offset.order.value < iterationOffset.order.value &&
+    isBeyondCenterOfMass(centerOfMassArgs)
+  );
+}
 
 interface SortableWordProps {
   offsets: Offset[];
@@ -44,6 +71,7 @@ const SortableWord = ({
   const isAnimating = useSharedValue(false);
   const translation = useVector();
   const isInBank = useDerivedValue(() => offset.order.value === -1);
+
   const onGestureEvent = useAnimatedGestureHandler<
     PanGestureHandlerGestureEvent,
     { x: number; y: number }
@@ -63,40 +91,71 @@ const SortableWord = ({
     onActive: ({ translationX, translationY }, ctx) => {
       translation.x.value = ctx.x + translationX;
       translation.y.value = ctx.y + translationY;
-      if (isInBank.value && translation.y.value < SENTENCE_HEIGHT) {
-        offset.order.value = lastOrder(offsets);
-        calculateLayout(offsets, containerWidth);
+
+      if (isInBank.value) {
+        if (translation.y.value < SENTENCE_HEIGHT) {
+          offset.order.value = lastOrder(offsets);
+          calculateLayout(offsets, containerWidth);
+        }
+
+        return;
       } else if (!isInBank.value && translation.y.value > SENTENCE_HEIGHT) {
         offset.order.value = -1;
         remove(offsets, index);
         calculateLayout(offsets, containerWidth);
+
+        return;
       }
-      for (let i = 0; i < offsets.length; i++) {
-        const o = offsets[i];
-        if (i === index && o.order.value !== -1) {
+
+      const reorderingCandidates = [];
+      let isAfter = false;
+      let isBefore = false;
+
+      const sortedOffsets = getSortedOffsets(offsets);
+      for (let i = 0; i < sortedOffsets.length; i++) {
+        const iterationOffset = sortedOffsets[i];
+        if (offset === iterationOffset) {
           continue;
         }
-        if (
-          between(translation.x.value, o.x.value, o.x.value + o.width.value) &&
-          between(translation.y.value, o.y.value, o.y.value + WORD_HEIGHT)
+        const centerOfMassArgs = {
+          translation,
+          offset,
+          iterationOffset,
+        };
+
+        if (isAfterCenterOfMass(offset, iterationOffset, centerOfMassArgs)) {
+          isAfter = true;
+          reorderingCandidates.push(iterationOffset.order.value);
+        } else if (
+          isBeforeCenterOfMass(offset, iterationOffset, centerOfMassArgs)
         ) {
-          reorder(offsets, offset.order.value, o.order.value);
-          calculateLayout(offsets, containerWidth);
-          break;
+          isBefore = true;
+          reorderingCandidates.push(iterationOffset.order.value);
         }
       }
+
+      if (isAfter && isBefore) {
+        throw new Error(
+          "can't have the draggable element moving against centers of masses before and after it at the same time"
+        );
+      }
+
+      if (reorderingCandidates.length === 0) {
+        return;
+      }
+
+      const reorderingSubject = isAfter
+        ? Math.max(...reorderingCandidates)
+        : Math.min(...reorderingCandidates);
+
+      reorder(offsets, offset.order.value, reorderingSubject);
+      calculateLayout(offsets, containerWidth);
     },
-    onEnd: ({ velocityX, velocityY }) => {
-      isAnimating.value = true;
-      translation.x.value = withSpring(
-        offset.x.value,
-        { velocity: velocityX },
-        () => (isAnimating.value = false)
-      );
-      translation.y.value = withSpring(offset.y.value, { velocity: velocityY });
+    onEnd: () => {
       isGestureActive.value = false;
     },
   });
+
   const translateX = useDerivedValue(() => {
     if (isGestureActive.value) {
       return translation.x.value;
@@ -105,6 +164,7 @@ const SortableWord = ({
       isInBank.value ? offset.originalX.value - MARGIN_LEFT : offset.x.value
     );
   });
+
   const translateY = useDerivedValue(() => {
     if (isGestureActive.value) {
       return translation.y.value;
@@ -113,6 +173,7 @@ const SortableWord = ({
       isInBank.value ? offset.originalY.value + MARGIN_TOP : offset.y.value
     );
   });
+
   const style = useAnimatedStyle(() => {
     return {
       position: "absolute",
@@ -127,6 +188,7 @@ const SortableWord = ({
       ],
     };
   });
+
   return (
     <>
       <Placeholder offset={offset} />
